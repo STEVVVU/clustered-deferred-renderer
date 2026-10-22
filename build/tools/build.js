@@ -3,12 +3,10 @@ import { spawnAndCheck } from '../lib/spawn.js';
 
 mkdirSync('out', { recursive: true });
 
-spawnAndCheck('node', ['build/tools/copy.js'], {
-  shell: true,
+spawnAndCheck(process.execPath, ['build/tools/copy.js'], {
   stdio: 'inherit',
 });
 
-spawnAndCheck('./node_modules/.bin/rollup', ['-c'], {
-  shell: true,
+spawnAndCheck(process.execPath, ['node_modules/rollup/dist/bin/rollup', '-c'], {
   stdio: 'inherit',
 });

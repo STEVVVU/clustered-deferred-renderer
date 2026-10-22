@@ -1,0 +1,5 @@
+# Upstream workflow archive
+
+The two `.yml.txt` files retain the exact original bytes from WebGPU Samples commit `e040ec1a20dbbe01afed30c812e825b2639cfe5b`, outside `.github/workflows/` so they cannot publish or execute. The original publisher is not merely hidden behind a runtime condition. The redundant original build workflow is archived with it; the maintained active workflow is `.github/workflows/clustered-static.yml`.
+
+Active action versions were checked against official release pages and exact tag refs on2026-10-21: [checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1), SHA `3d3c42e5aac5ba805825da76410c181273ba90b1`; [setup-node v7.1.0](https://github.com/actions/setup-node/releases/tag/v7.1.0), SHA `949feb2413d6458794dcd2491c4babbbce0c15c1`. Both pinned `action.yml` sources use Node24 and retain the inputs used by this read-only Ubuntu workflow. Checkout does not persist credentials. CI has not been executed remotely; local equivalents pass, and hosted GPU execution is explicitly unverified.

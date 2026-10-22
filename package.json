@@ -10,6 +10,8 @@
     "url": "https://github.com/webgpu/webgpu-samples.git"
   },
   "scripts": {
+    "test:clustered": "node --test sample/clusteredRendering/math.test.mjs",
+    "typecheck": "tsc -p sample/clusteredRendering/tsconfig.json",
     "lint": "eslint --ext .ts,.js,.html src/ sample/ build/ .eslintrc.cjs rollup.config.js index.html",
     "fix": "eslint --fix --ext .ts,.js,.html src/ sample/ build/ .eslintrc.cjs rollup.config.js index.html",
     "build": "node build/tools/build.js",
@@ -51,7 +53,6 @@
     "glob": "^11.1.0",
     "prettier": "^2.8.8",
     "rollup": "^4.56.0",
-    "rollup-plugin-copy": "^3.5.0",
     "servez": "^2.3.2",
     "tslib": "^2.8.1",
     "typescript": "^5.9.3"

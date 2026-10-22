@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, shrink-to-fit=no"
+    />
+    <title>webgpu-samples: clusteredRendering</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        display: flex;
+        place-content: center center;
+        background: #111;
+      }
+      canvas {
+        width: 600px;
+        height: 600px;
+        max-width: 100%;
+        display: block;
+      }
+      #status {
+        position: absolute;
+        left: 8px;
+        bottom: 8px;
+        color: white;
+        font: 11px 'Lucida Grande', sans-serif;
+        max-width: 70%;
+      }
+    </style>
+    <script defer src="main.js" type="module"></script>
+    <script defer type="module" src="../../js/iframe-helper.js"></script>
+  </head>
+  <body>
+    <canvas aria-label="Clustered lighting procedural room"></canvas>
+    <output id="status" aria-live="polite">Starting WebGPU…</output>
+  </body>
+</html>

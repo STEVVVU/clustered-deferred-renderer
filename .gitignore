@@ -6,3 +6,9 @@ id_rsa_deploy_key.pub
 github_token
 pnpm-lock.yaml
 .DS_Store
+.agents/evidence/
+*-build.log
+*-types.log
+baseline-audit.json
+current-audit.json
+audit-fix.log
