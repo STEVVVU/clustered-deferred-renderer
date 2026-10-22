@@ -31,7 +31,7 @@ interface Driver {
   dimensions(): { width: number; height: number; aspect: number };
   adapter: object;
 }
-function imageError(
+export function imageError(
   reference: Uint8Array,
   actual: Uint8Array,
   tolerance: number

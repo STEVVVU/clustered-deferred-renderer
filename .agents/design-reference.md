@@ -1,5 +1,7 @@
 # Clustered sample design reference
 
+The metrics extension reuses the inspected dat.GUI action row for one Benchmark control. It adds no layout or styling. New source is in `sample/clusteredRendering/benchmark.ts`. Main drove the actual visible control, observed PASS, exported verification and benchmark JSON, and inspected its screenshot on 22 October 2026; no new redesign or responsive-fidelity claim is made. Existing `docs/evidence/final-desktop.png` was visually inspected before this change. The benchmark temporarily changes internal render resolution and geometry, then restores the standard 27-box view and canvas sizing.
+
 Primary reference: https://webgpu.github.io/webgpu-samples/sample/deferredRendering/ . Main agent inspected the live official sample with CUA before implementation. Captures: `C:/Users/steve/.codex/orchestrate/coursework30-20261021/evidence/P18/reference/deferred-standalone.png` (748×766 viewport, centered 600×600 canvas at x74 y0, dat.GUI 245px wide 15px from right); `deferred-desktop.png` (actual DOM 800×450, not 1280px).
 
 Reuse the inherited HTML flex shell and dat.GUI: charcoal #111 background, 600px square canvas, compact 11px Lucida Grande controls. Required departures: procedural room replaces the dragon for deterministic lighting coverage; added mode, packed, lights, freeze, orbit, verify, export, and status controls. No added framework or visual branding. Main agent completed the matching-viewport rendered comparison described below.

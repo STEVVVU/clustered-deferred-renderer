@@ -14,6 +14,7 @@ import {
   clusterBounds,
 } from './math';
 import { runVerification } from './verify';
+import { runBenchmark } from './benchmark';
 
 const canvas = document.querySelector('canvas') as HTMLCanvasElement;
 const status = document.querySelector('#status') as HTMLOutputElement;
@@ -24,10 +25,12 @@ const settings = {
   freeze: true,
   orbit: 0,
   verify: () => verify(),
+  benchmark: () => benchmark(),
   export: () => exportEvidence(),
 };
 let running = true;
 let verifying = false;
+let verified = false;
 let evidence: unknown;
 const fail = (error: unknown) => {
   running = false;
@@ -37,12 +40,17 @@ const fail = (error: unknown) => {
 window.addEventListener('error', (event) => fail(event.message));
 window.addEventListener('unhandledrejection', (event) => fail(event.reason));
 
-const adapter = await navigator.gpu?.requestAdapter();
+const adapter = await navigator.gpu?.requestAdapter({
+  powerPreference: 'high-performance',
+});
 if (!adapter)
   throw new Error(
     'WebGPU adapter unavailable; use a supported browser on localhost or HTTPS.'
   );
-const device = await adapter.requestDevice();
+const hasTimestamps = adapter.features.has('timestamp-query');
+const device = await adapter.requestDevice({
+  requiredFeatures: hasTimestamps ? ['timestamp-query'] : [],
+});
 device.lost.then((info) => fail(`Device lost: ${info.message}`));
 device.addEventListener('uncapturederror', (event) =>
   fail(event.error.message)
@@ -229,22 +237,34 @@ function box(center: number[], size: number[], color: number[]) {
       }
     }
 }
-box([0, -0.3, 0], [24, 0.6, 24], [0.55, 0.55, 0.55]);
-box([0, 5, -11], [24, 10, 0.5], [0.6, 0.6, 0.6]);
-for (let z = -2; z <= 2; z++)
-  for (let x = -2; x <= 2; x++) {
-    const height = 1.3 + ((x * x + z * z) % 4) * 0.8;
-    box(
-      [x * 3.6, height / 2, z * 3.6],
-      [1.8, height, 1.8],
-      [0.32 + (x + 2) * 0.08, 0.35, 0.32 + (z + 2) * 0.08]
-    );
-  }
-const vertexBuffer = device.createBuffer({
-  size: vertices.length * 4,
-  usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-});
-device.queue.writeBuffer(vertexBuffer, 0, new Float32Array(vertices));
+function buildGeometry(grid: number) {
+  vertices.length = 0;
+  box([0, -0.3, 0], [24, 0.6, 24], [0.55, 0.55, 0.55]);
+  box([0, 5, -11], [24, 10, 0.5], [0.6, 0.6, 0.6]);
+  const half = (grid - 1) / 2;
+  const step = 18 / grid;
+  for (let z = -half; z <= half; z++)
+    for (let x = -half; x <= half; x++) {
+      const height = 1.3 + ((x * x + z * z) % 4) * 0.8;
+      box(
+        [x * step, height / 2, z * step],
+        [step / 2, height, step / 2],
+        [
+          0.32 + ((x + half) / (grid - 1)) * 0.32,
+          0.35,
+          0.32 + ((z + half) / (grid - 1)) * 0.32,
+        ]
+      );
+    }
+  const buffer = device.createBuffer({
+    size: vertices.length * 4,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(buffer, 0, new Float32Array(vertices));
+  return buffer;
+}
+let vertexBuffer = buildGeometry(5);
+let benchmarkSize: readonly [number, number] | undefined;
 
 let width = 0,
   height = 0,
@@ -258,14 +278,18 @@ const cameraData = new ArrayBuffer(240);
 const floats = new Float32Array(cameraData);
 const integers = new Uint32Array(cameraData);
 function resources(usePacked: boolean) {
-  const wantedWidth = Math.min(
-    1200,
-    Math.max(1, Math.round(canvas.clientWidth * window.devicePixelRatio))
-  );
-  const wantedHeight = Math.min(
-    1200,
-    Math.max(1, Math.round(canvas.clientHeight * window.devicePixelRatio))
-  );
+  const wantedWidth =
+    benchmarkSize?.[0] ??
+    Math.min(
+      1200,
+      Math.max(1, Math.round(canvas.clientWidth * window.devicePixelRatio))
+    );
+  const wantedHeight =
+    benchmarkSize?.[1] ??
+    Math.min(
+      1200,
+      Math.max(1, Math.round(canvas.clientHeight * window.devicePixelRatio))
+    );
   if (
     width === wantedWidth &&
     height === wantedHeight &&
@@ -349,10 +373,26 @@ function update(
   device.queue.writeBuffer(lightBuffer, 0, data);
 }
 
-function render(mode: number, usePacked: boolean, show = true) {
+type Timing = { query: GPUQuerySet; resolve: GPUBuffer; read: GPUBuffer };
+function render(
+  mode: number,
+  usePacked: boolean,
+  show = true,
+  timing?: Timing
+) {
   const encoder = device.createCommandEncoder();
+  const stamps = (beginningOfPassWriteIndex: number) =>
+    timing
+      ? {
+          timestampWrites: {
+            querySet: timing.query,
+            beginningOfPassWriteIndex,
+            endOfPassWriteIndex: beginningOfPassWriteIndex + 1,
+          },
+        }
+      : {};
   if (mode !== 0) {
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(stamps(0));
     pass.setPipeline(compute);
     pass.setBindGroup(0, computeGroup);
     pass.dispatchWorkgroups(Math.ceil(CLUSTERS / 64));
@@ -366,6 +406,7 @@ function render(mode: number, usePacked: boolean, show = true) {
     storeOp: 'store',
   });
   const geometryPass = encoder.beginRenderPass({
+    ...stamps(2),
     colorAttachments:
       mode === 2
         ? usePacked
@@ -388,6 +429,7 @@ function render(mode: number, usePacked: boolean, show = true) {
   geometryPass.end();
   if (mode === 2) {
     const pass = encoder.beginRenderPass({
+      ...stamps(4),
       colorAttachments: [attachment(textures[4])],
     });
     pass.setPipeline(deferred);
@@ -398,6 +440,7 @@ function render(mode: number, usePacked: boolean, show = true) {
   }
   if (show) {
     const pass = encoder.beginRenderPass({
+      ...stamps(6),
       colorAttachments: [
         {
           view: context.getCurrentTexture().createView(),
@@ -411,7 +454,116 @@ function render(mode: number, usePacked: boolean, show = true) {
     pass.draw(3);
     pass.end();
   }
+  if (timing) {
+    encoder.resolveQuerySet(timing.query, 0, 8, timing.resolve, 0);
+    encoder.copyBufferToBuffer(timing.resolve, 0, timing.read, 0, 64);
+  }
   device.queue.submit([encoder.finish()]);
+}
+
+async function benchmark() {
+  if (verifying || !running) return;
+  if (!verified) {
+    status.value = 'Run Verify GPU before Benchmark';
+    return;
+  }
+  verifying = true;
+  status.value = 'Benchmark running; keep this tab visible';
+  const timing: Timing | undefined = hasTimestamps
+    ? {
+        query: device.createQuerySet({ type: 'timestamp', count: 8 }),
+        resolve: device.createBuffer({
+          size: 64,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+        }),
+        read: device.createBuffer({
+          size: 64,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+      }
+    : undefined;
+  device.pushErrorScope('validation');
+  let failure: unknown;
+  try {
+    evidence = await runBenchmark({
+      configure(w, h, grid) {
+        benchmarkSize = [w, h];
+        vertexBuffer.destroy();
+        vertexBuffer = buildGeometry(grid);
+      },
+      update,
+      render,
+      readImage,
+      async measure(mode, usePacked) {
+        const started = performance.now();
+        render(mode, usePacked, true, timing);
+        await device.queue.onSubmittedWorkDone();
+        const wallMs = performance.now() - started;
+        if (!timing) return { wallMs, gpuMs: null, stagesMs: null };
+        await timing.read.mapAsync(GPUMapMode.READ);
+        const ticks = Array.from(
+          new BigUint64Array(timing.read.getMappedRange())
+        );
+        timing.read.unmap();
+        const stagesMs: Record<string, number> = {};
+        for (const [name, index] of [
+          ['culling', 0],
+          ['geometry', 2],
+          ['lighting', 4],
+          ['present', 6],
+        ] as const) {
+          if ((index === 0 && mode === 0) || (index === 4 && mode !== 2))
+            continue;
+          stagesMs[name] = Number(ticks[index + 1] - ticks[index]) / 1e6;
+        }
+        return {
+          wallMs,
+          gpuMs: Number(ticks[7] - ticks[mode === 0 ? 2 : 0]) / 1e6,
+          stagesMs,
+        };
+      },
+      bytes(usePacked) {
+        return {
+          geometry: vertexBuffer.size,
+          buffers:
+            uniform.size +
+            lightBuffer.size +
+            clusterBuffer.size +
+            boundsBuffer.size,
+          textures:
+            width * height * (usePacked ? 16 : 20) + (usePacked ? 12 : 8),
+          scope:
+            'logical payload only; physical VRAM allocation unavailable in WebGPU',
+        };
+      },
+      adapter: {
+        vendor: adapter.info.vendor,
+        architecture: adapter.info.architecture,
+        device: adapter.info.device,
+        description: adapter.info.description,
+        timestampQuery: hasTimestamps,
+      },
+    });
+  } catch (error) {
+    failure = error;
+  } finally {
+    const validationError = await device.popErrorScope();
+    failure ||= validationError;
+    timing?.query.destroy();
+    timing?.resolve.destroy();
+    timing?.read.destroy();
+    benchmarkSize = undefined;
+    vertexBuffer.destroy();
+    vertexBuffer = buildGeometry(5);
+    if (failure)
+      evidence = { pass: false, error: String(failure), benchmark: true };
+    status.value = failure
+      ? `FAIL: ${String(failure)}`
+      : (evidence as { pass: boolean }).pass
+      ? 'Benchmark PASS; export evidence'
+      : 'Benchmark FAIL; export evidence';
+    verifying = false;
+  }
 }
 
 async function readBuffer(source: GPUBuffer, size: number) {
@@ -572,6 +724,7 @@ async function verify() {
       validationError ||
       (!running && 'Device stopped during verification');
     if (failure) evidence = { pass: false, error: String(failure) };
+    verified = !failure && (evidence as { pass: boolean }).pass;
     status.value = failure
       ? `FAIL: ${String(failure)}`
       : (evidence as { pass: boolean }).pass
@@ -607,6 +760,7 @@ gui.add(settings, 'lights', 0, MAX_LIGHTS, 1).name('Lights');
 gui.add(settings, 'freeze').name('Freeze lights');
 gui.add(settings, 'orbit', -Math.PI, Math.PI, 0.01).name('Camera orbit');
 gui.add(settings, 'verify').name('Verify GPU');
+gui.add(settings, 'benchmark').name('Benchmark');
 gui.add(settings, 'export').name('Export evidence');
 status.value = 'Ready';
 function frame(time: number) {
