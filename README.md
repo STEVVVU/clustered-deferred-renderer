@@ -2,6 +2,131 @@
 
 A coursework extension of the complete [official WebGPU Samples](https://github.com/webgpu/webgpu-samples) tree at `e040ec1a20dbbe01afed30c812e825b2639cfe5b`. Original history, samples, author notices, APIs, assets, [BSD-3-Clause license](LICENSE.txt), and [original README](README.upstream.md) are retained. New work is in `sample/clusteredRendering/`; no student skeleton or solution code is used.
 
+## Contents
+
+- [Architecture and execution guide](#architecture-and-execution-guide)
+- [Run](#run)
+- [Added behavior](#added-behavior)
+- [Verification and results](#verification-and-results)
+- [Dependency and operational limits](#dependency-and-operational-limits)
+- [Verification skill](.agents/skills/verify-clustered-renderer/SKILL.md)
+
+## Architecture and execution guide
+
+The extension adds [clustered shading](#clustered-shading) in forward and deferred paths inside the retained WebGPU Samples tree. The inherited camera, gallery, math package, and build system remain the host; the new sample owns procedural boxes, bounded lights, cluster culling, and its verification controls. The inherited deferred sample is a separate all-light path, not part of this extension.
+
+```mermaid
+flowchart LR
+  A["Samples gallery"] --> B["Clustered rendering sample"]
+  B --> C["WebGPU device"]
+  C --> D["Forward or deferred pipelines"]
+  D --> E["Canvas"]
+  B --> F["Verification and evidence export"]
+```
+
+The gallery starts the sample. The browser creates the device and pipelines; frame work runs in WebGPU. Verification and evidence export read results through the sample's explicit controls.
+
+```mermaid
+flowchart TD
+  subgraph culling["Cluster assignment"]
+    A["Update camera, lights, and grid bounds"] --> B["Compute sphere-to-cluster culling"]
+  B --> C{"Cluster count exceeds 64?"}
+  C -->|"yes"| D["Use all-light fallback for that cluster"]
+    C -->|"no"| E["Use stored cluster indices"]
+  end
+  D --> F{"Selected mode"}
+  E --> F
+  subgraph modes["Render paths"]
+    F -->|"naive forward"| G["Shade geometry against all lights"]
+  F -->|"clustered forward"| H["Shade geometry against cluster list"]
+  F -->|"clustered deferred"| I["Write G-buffer and depth"]
+  I --> J["Reconstruct position and decode attributes"]
+  J --> K["Shade fullscreen pass"]
+  G --> L["Canvas output"]
+  H --> L
+  K --> L
+  end
+  M["Adapter, shader, or device failure"] --> N["Stop and show failure status"]
+```
+
+Culling stores at most 64 indices but preserves the full count. The [overflow fallback](#overflow-fallback) loops across all lights, keeping correctness at higher cost. [Deferred shading](#deferred-shading) writes geometry data to a [G-buffer](#gbuffer) first, then reconstructs view position from depth for lighting.
+
+| Subsystem | Responsibility and invariant | Source |
+| --- | --- | --- |
+| Gallery integration | Registers the sample and owns inherited page bootstrapping. | [`samples.ts`](src/samples.ts), [`main.ts`](src/main.ts) |
+| Scene and controls | Builds procedural boxes, updates camera/light settings, and selects one of three paths. | [`main.ts`](sample/clusteredRendering/main.ts), [`math.ts`](sample/clusteredRendering/math.ts) |
+| Cluster culling and lighting | Tests light spheres against conservative AABBs, stores 64 indices, and falls back when the count is larger. | [`render.wgsl`](sample/clusteredRendering/render.wgsl) |
+| Verification | Checks path outputs and captures browser-side evidence through explicit actions. | [`verify.ts`](sample/clusteredRendering/verify.ts), [`benchmark.ts`](sample/clusteredRendering/benchmark.ts) |
+| GPU target creation | Recreates bounded G-buffer and depth resources when viewport dimensions change. | [`main.ts`](sample/clusteredRendering/main.ts) |
+
+The user journey follows these steps:
+
+1. Open the clustered sample from the inherited gallery. The page requests a high-performance WebGPU adapter and device; if either is unavailable, it reports failure and cannot render.
+2. The sample updates the camera, procedural lights, and logarithmic cluster bounds. Compute culling writes per-cluster light indices and complete intersection counts.
+3. Choose naive forward, clustered forward, or clustered deferred. Forward paths shade geometry directly; deferred writes attributes and depth, then shades a fullscreen pass.
+4. If a cluster exceeds capacity, the shader evaluates every light for that cluster. Device loss, shader validation errors, or uncaught errors stop the loop and set a failure status.
+5. Use Verify GPU and Export evidence to capture the actual browser path. CPU tests do not establish shader execution.
+
+| Choice | Current implementation and rationale | Alternative and cost or reconsideration point |
+| --- | --- | --- |
+| Conservative cluster AABBs | Sphere intersection includes lights that can affect a cluster, avoiding dropped lights from tight approximate bounds. | Tighter bounds might reduce lists but cost more geometry or per-frame bound work. |
+| Capacity plus all-light fallback | Lists store 64 indices while retaining the true count; overflow triggers full lighting rather than truncation. | Larger fixed lists consume more storage per cluster; dropping excess lights would change the image. |
+| Logarithmic depth slices | The grid uses 12×12×16 cells across near/far depth, allocating more slices near the camera. | Uniform slices simplify indexing but may group near geometry less effectively; compare with the same scene and checks. |
+| Separate deferred G-buffer paths | Float and packed modes allow storage tradeoffs while reusing deferred lighting. | One representation avoids controls but prevents comparing precision and payload; timestamps are quantized and do not prove small stage differences. |
+| Bounded resize targets | Render targets cap at 1200×1200 to bound allocation. | Unbounded viewport targets can allocate more memory; change only with explicit resource and device checks. |
+
+The table gives rationale inferred from implementation, not historical design records. Results cover the owned procedural scene and tested browser/device. Logical texture bytes are not physical peak VRAM; GPU timestamp readings are quantized, and the CPU workflow does not claim GPU verification.
+
+<a id="clustered-shading"></a>
+
+<details><summary>What is clustered shading?</summary>
+
+Clustered shading partitions the view volume into cells and assigns nearby lights to each cell. This sample uses a 12×12×16 grid, so a fragment checks its cell's list instead of every light when that list fits.
+
+</details>
+
+<a id="cluster-aabb"></a>
+
+<details><summary>What is a cluster AABB?</summary>
+
+An axis-aligned bounding box is a box whose sides align with coordinate axes. The culling shader tests each light sphere against a conservative box for one cluster; a sphere intersection adds that light's index.
+
+</details>
+
+<a id="gbuffer"></a>
+
+<details><summary>What is a G-buffer?</summary>
+
+A G-buffer stores geometry attributes such as normal, albedo, and depth for later shading. The deferred sample writes those values, then reconstructs position from depth in a fullscreen lighting pass.
+
+</details>
+
+<a id="deferred-shading"></a>
+
+<details><summary>What is deferred shading?</summary>
+
+Deferred shading separates geometry rendering from lighting. Here geometry fills the G-buffer first, and a fullscreen pass reads its depth and material data to calculate clustered light contributions.
+
+</details>
+
+<a id="octahedral-encoding"></a>
+
+<details><summary>What is octahedral encoding?</summary>
+
+Octahedral encoding maps a unit normal onto two packed signed values. This sample can store the packed normal with packed albedo, reducing the G-buffer representation compared with float attributes.
+
+</details>
+
+<a id="overflow-fallback"></a>
+
+<details><summary>What is the overflow fallback?</summary>
+
+The overflow fallback handles clusters whose full light count exceeds the stored index capacity. Here the shader switches to an all-light loop when the count is above 64, preserving included lights at extra shading cost.
+
+</details>
+
+<a id="run"></a>
+
 ## Run
 
 Use Node 24 and the existing npm lockfile:
