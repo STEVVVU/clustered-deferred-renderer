@@ -14,6 +14,245 @@ A coursework extension of the complete [official WebGPU Samples](https://github.
 
 ## Architecture and execution guide
 
+<!-- execution-flow:start -->
+### Execution flow
+
+Start with the primary path, then expand a detailed workflow. Select a numbered node to see its operation, implementation techniques, and source. Solid arrows show the named control, data, or lifecycle handoff; dotted arrows show error paths. Separate entry points are named in each workflow.
+
+<a id="review-walkthrough"></a>
+
+#### Walk through one concrete example
+
+Render the clustered deferred mode at the current canvas size with a supported scene and device.
+
+**Trace.** [Acquire WebGPU device and configure canvas](#flow-step-initialize-gpu) → [Resize bounded render resources](#flow-step-resize-resources) → [Build deterministic inputs and geometry](#flow-step-prepare-scene) → [Cull lights into bounded cluster lists](#flow-step-compute-clusters) → [Render geometry and optional G-buffer](#flow-step-render-geometry) → [Shade diffuse light and present](#flow-step-shade-present).
+
+**Result and boundary.** Cluster lists bound each cluster to 64 stored light indices while preserving the true match count; clusters with overflow shade using all lights, then deferred data is decoded and presented. Verification and benchmark are separate drivers.
+
+<details>
+<summary>Implementation decisions to explain</summary>
+
+**Why preserve the true cluster match count when only 64 indices are stored?** The true count identifies overflow so shading can fall back to all lights instead of silently omitting contributors; overflow clusters therefore lose the usual list-based work reduction.
+
+[Serial sphere-to-AABB culling and bounded light-list construction](#technique-p18-cluster-light-lists) · [True-count overflow with all-light fallback](#technique-p18-overflow-fallback).
+
+**Why cap resized pixel dimensions and use conservative cluster bounds?** The cap bounds render resource size, and outward-rounded bounds avoid excluding lights at cluster edges; conservative bounds may include extra lights.
+
+[Capped resize resources with fail-stop error reporting](#technique-p18-bounded-resize-failure-state) · [Logarithmic depth slices with outward-rounded AABBs](#technique-p18-logarithmic-conservative-grid).
+
+</details>
+
+#### Primary execution flow
+
+The gallery opens clusteredRendering; its animation loop prepares bounded resources and CPU uploads before compute culling, render passes and presentation. Verification readbacks and correctness-gated benchmark are independent user-triggered paths.
+
+```mermaid
+flowchart TD
+    n1["1. Route gallery entry to sample"]
+    click n1 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-gallery-route" "Open step, techniques, and source" _top
+    n2["2. Acquire WebGPU device and<br/>configure canvas"]
+    click n2 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-initialize-gpu" "Open step, techniques, and source" _top
+    n3["3. Build deterministic inputs<br/>and geometry"]
+    click n3 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-prepare-scene" "Open step, techniques, and source" _top
+    n4["4. Resize bounded render<br/>resources"]
+    click n4 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-resize-resources" "Open step, techniques, and source" _top
+    n5["5. Cull lights into bounded<br/>cluster lists"]
+    click n5 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-compute-clusters" "Open step, techniques, and source" _top
+    n6["6. Render geometry and optional<br/>G-buffer"]
+    click n6 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-render-geometry" "Open step, techniques, and source" _top
+    n7["7. Shade diffuse light and<br/>present"]
+    click n7 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-shade-present" "Open step, techniques, and source" _top
+    n1 -->|"iframe loads standalone main module"| n2
+    n2 -->|"device initialized"| n4
+    n4 -->|"resources ready before camera and<br/>light uploads"| n3
+    n3 -->|"clustered mode"| n5
+    n5 -->|"compute pass ends before geometry pass"| n6
+    n6 -->|"deferred mode shades G-buffer; all<br/>modes present"| n7
+    n3 -->|"mode 0 skips cluster compute"| n6
+```
+
+**Detailed workflows.** [Visible rendering loop](#flow-workflow-render-loop) · [GPU verification and evidence](#flow-workflow-verification) · [Correctness-gated benchmark](#flow-workflow-benchmark).
+
+<a id="flow-workflow-render-loop"></a>
+
+<details>
+<summary>Visible rendering loop</summary>
+
+The page animation frame updates inputs/resources and submits the selected rendering mode; naive mode skips compute.
+
+```mermaid
+flowchart TD
+    n2["2. Acquire WebGPU device and<br/>configure canvas"]
+    click n2 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-initialize-gpu" "Open step, techniques, and source" _top
+    n3["3. Build deterministic inputs<br/>and geometry"]
+    click n3 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-prepare-scene" "Open step, techniques, and source" _top
+    n4["4. Resize bounded render<br/>resources"]
+    click n4 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-resize-resources" "Open step, techniques, and source" _top
+    n5["5. Cull lights into bounded<br/>cluster lists"]
+    click n5 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-compute-clusters" "Open step, techniques, and source" _top
+    n6["6. Render geometry and optional<br/>G-buffer"]
+    click n6 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-render-geometry" "Open step, techniques, and source" _top
+    n7["7. Shade diffuse light and<br/>present"]
+    click n7 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-shade-present" "Open step, techniques, and source" _top
+    n2 -->|"device initialized"| n4
+    n4 -->|"resources ready before camera and<br/>light uploads"| n3
+    n3 -->|"clustered mode"| n5
+    n5 -->|"compute pass ends before geometry pass"| n6
+    n6 -->|"deferred mode shades G-buffer; all<br/>modes present"| n7
+    n3 -->|"mode 0 skips cluster compute"| n6
+```
+
+</details>
+
+<a id="flow-workflow-verification"></a>
+
+<details>
+<summary>GPU verification and evidence</summary>
+
+User-triggered verification reads GPU lists, bounds and image independently for CPU and image comparisons, then export saves evidence.
+
+```mermaid
+flowchart TD
+    n8["8. Run GPU verification with<br/>independent readbacks"]
+    click n8 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-verify-readback" "Open step, techniques, and source" _top
+```
+
+</details>
+
+<a id="flow-workflow-benchmark"></a>
+
+<details>
+<summary>Correctness-gated benchmark</summary>
+
+A user-triggered benchmark runs only after GPU verification passes and optionally records GPU timestamps.
+
+```mermaid
+flowchart TD
+    n9["9. Benchmark only after<br/>verification passes"]
+    click n9 href "https://github.com/STEVVVU/clustered-deferred-renderer#flow-step-benchmark-timing" "Open step, techniques, and source" _top
+```
+
+</details>
+
+#### Steps, techniques, and source
+
+These source traces cover the active scope below. They explain implementation behavior; benchmark results and their limits remain in the measurement sections.
+
+<a id="flow-step-gallery-route"></a>
+
+##### 1. Route gallery entry to sample
+
+**Component.** src/samples.ts / clusteredRendering metadata. The gallery registers clusteredRendering metadata, which points the iframe at its standalone sample page and bootstraps main.ts.
+
+Gallery routing only selects the sample page.
+
+**Source.** [`src/samples.ts:13`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/src/samples.ts#L13) · [`sample/clusteredRendering/meta.ts:1`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/meta.ts#L1). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-initialize-gpu"></a>
+
+##### 2. Acquire WebGPU device and configure canvas
+
+**Component.** sample/clusteredRendering/main.ts. The page requests a high-performance adapter, enables timestamp-query only when supported, and configures the WebGPU canvas. Missing adapter or canvas throws; device loss and uncaptured errors stop rendering and publish failure status.
+
+**Techniques at this step.** [Capped resize resources with fail-stop error reporting](#technique-p18-bounded-resize-failure-state).
+
+**Source.** [`sample/clusteredRendering/main.ts:42`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L42) · [`sample/clusteredRendering/main.ts:35`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L35). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-prepare-scene"></a>
+
+##### 3. Build deterministic inputs and geometry
+
+**Component.** sample/clusteredRendering/main.ts / math.ts. Each frame makes seeded light inputs, transforms them to view space, rounds uploaded light values through f32, and uploads camera/light buffers. Procedural expanded boxes form the room and grid; geometry is rebuilt for benchmark grid changes.
+
+**Techniques at this step.** [Seeded deterministic light inputs](#technique-p18-seeded-inputs) · [Procedural expanded-box scene geometry](#technique-p18-procedural-box-geometry).
+
+**Source.** [`sample/clusteredRendering/math.ts:10`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/math.ts#L10) · [`sample/clusteredRendering/main.ts:240`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L240) · [`sample/clusteredRendering/main.ts:338`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L338). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-resize-resources"></a>
+
+##### 4. Resize bounded render resources
+
+**Component.** sample/clusteredRendering/main.ts. update derives pixel dimensions from canvas and device-pixel ratio, capped at 1200 per axis, or uses benchmark dimensions. On dimension changes it uploads conservative cluster bounds, updates canvas size, destroys prior textures, and creates textures/bind groups for the selected packed representation.
+
+**Techniques at this step.** [Capped resize resources with fail-stop error reporting](#technique-p18-bounded-resize-failure-state) · [Logarithmic depth slices with outward-rounded AABBs](#technique-p18-logarithmic-conservative-grid) · [Float and packed G-buffer representations](#technique-p18-gbuffer-encoding).
+
+**Source.** [`sample/clusteredRendering/main.ts:280`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L280) · [`sample/clusteredRendering/math.ts:28`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/math.ts#L28). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-compute-clusters"></a>
+
+##### 5. Cull lights into bounded cluster lists
+
+**Component.** sample/clusteredRendering/render.wgsl. For clustered modes, one compute invocation handles each cluster and serially tests all lights against its AABB. It stores at most 64 indices while preserving the true match count; there is no atomic append. Bounds use logarithmic depth slices and outward-rounded frustum corner AABBs.
+
+**Techniques at this step.** [Serial sphere-to-AABB culling and bounded light-list construction](#technique-p18-cluster-light-lists) · [True-count overflow with all-light fallback](#technique-p18-overflow-fallback) · [Logarithmic depth slices with outward-rounded AABBs](#technique-p18-logarithmic-conservative-grid).
+
+**Source.** [`sample/clusteredRendering/render.wgsl:17`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/render.wgsl#L17) · [`sample/clusteredRendering/math.ts:28`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/math.ts#L28). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-render-geometry"></a>
+
+##### 6. Render geometry and optional G-buffer
+
+**Component.** sample/clusteredRendering/main.ts / render.wgsl. The command encoder runs compute first for clustered modes, then draws room geometry. Forward modes shade into the presentation texture; deferred mode writes float or packed normal/albedo data and depth. Packed normals use octahedral encoding.
+
+**Techniques at this step.** [Ordered compute, geometry, lighting, and presentation passes](#technique-p18-ordered-render-pass-composition) · [Float and packed G-buffer representations](#technique-p18-gbuffer-encoding).
+
+**Source.** [`sample/clusteredRendering/main.ts:377`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L377) · [`sample/clusteredRendering/render.wgsl:97`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/render.wgsl#L97). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-shade-present"></a>
+
+##### 7. Shade diffuse light and present
+
+**Component.** sample/clusteredRendering/render.wgsl / main.ts. The shared Lambert contribution loop uses all lights for naive mode and cluster indices for ordinary clustered mode; a true count above 64 falls back to all lights for that cluster. Deferred shading reconstructs view position from depth, decodes the selected G-buffer form, then uses the same lighting path; a final fullscreen pass presents the result.
+
+**Techniques at this step.** [Naive and clustered diffuse-light loops](#technique-p18-mode-shared-lighting-loops) · [True-count overflow with all-light fallback](#technique-p18-overflow-fallback) · [View-position reconstruction from depth](#technique-p18-position-reconstruction) · [Ordered compute, geometry, lighting, and presentation passes](#technique-p18-ordered-render-pass-composition).
+
+**Source.** [`sample/clusteredRendering/render.wgsl:61`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/render.wgsl#L61) · [`sample/clusteredRendering/render.wgsl:108`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/render.wgsl#L108) · [`sample/clusteredRendering/main.ts:377`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L377). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-verify-readback"></a>
+
+##### 8. Run GPU verification with independent readbacks
+
+**Component.** sample/clusteredRendering/main.ts / verify.ts / math.ts. Verify GPU drives named deterministic workloads, reads cluster and bounds buffers separately from the rendered image, and compares GPU lists to the independent CPU sphere/AABB oracle and images to reference modes. Validation errors or failed cases yield failed evidence; export downloads the evidence JSON.
+
+**Techniques at this step.** [GPU readback against independent CPU and image oracles](#technique-p18-readback-oracle).
+
+**Source.** [`sample/clusteredRendering/main.ts:693`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L693) · [`sample/clusteredRendering/main.ts:569`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L569) · [`sample/clusteredRendering/main.ts:584`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L584) · [`sample/clusteredRendering/verify.ts:67`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/verify.ts#L67) · [`sample/clusteredRendering/math.ts:71`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/math.ts#L71). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-benchmark-timing"></a>
+
+##### 9. Benchmark only after verification passes
+
+**Component.** sample/clusteredRendering/main.ts / benchmark.ts. Benchmark is rejected until verification passes. It configures workloads, warms each render path, checks image correctness and visible lit channels, then interleaves timed samples; timestamp-query measurements are included only when the adapter supports them. Timing/readback is a separate driver from the visible animation loop.
+
+**Techniques at this step.** [Correctness-gated interleaved timing with optional GPU timestamps](#technique-p18-correctness-gated-benchmark).
+
+**Source.** [`sample/clusteredRendering/main.ts:464`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L464) · [`sample/clusteredRendering/benchmark.ts:48`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/benchmark.ts#L48) · [`sample/clusteredRendering/main.ts:376`](https://github.com/STEVVVU/clustered-deferred-renderer/blob/main/sample/clusteredRendering/main.ts#L376). [Back to execution flow](#execution-flow).
+
+<details>
+<summary>Scope and subsystem coverage</summary>
+
+Local clusteredRendering gallery route, render loop, resize resources, deterministic CPU inputs and bounds, GPU cull and forward/deferred render paths, plus separate verification and benchmark drivers.
+
+- **Gallery registration and sample page.** Gallery metadata selects the standalone page and its WebGPU bootstrap. [Step 1](#flow-step-gallery-route), [Step 2](#flow-step-initialize-gpu).
+- **Scene input and procedural geometry.** Seeded lights and expanded procedural boxes feed uploads and draws. [Step 3](#flow-step-prepare-scene).
+- **Cluster grid and light assignment.** Conservative logarithmic bounds feed serial capped per-cluster lists and overflow fallback. [Step 4](#flow-step-resize-resources), [Step 5](#flow-step-compute-clusters), [Step 7](#flow-step-shade-present).
+- **Forward and deferred rendering.** Forward and deferred paths share diffuse lighting; deferred reads depth and either G-buffer representation. [Step 6](#flow-step-render-geometry), [Step 7](#flow-step-shade-present).
+- **Resize and failure handling.** Dimensions are capped, old textures destroyed on change, and device/error failures stop the loop. [Step 2](#flow-step-initialize-gpu), [Step 4](#flow-step-resize-resources).
+- **GPU verification and readback.** GPU list and bounds buffers plus image are read separately and checked against independent oracles. [Step 8](#flow-step-verify-readback).
+- **Benchmark and timing.** Verification gate, workload correctness checks, interleaved timing and optional GPU timestamps. [Step 9](#flow-step-benchmark-timing).
+
+Outside this flow audit:
+
+- `sample/deferredRendering/`. Separate inherited all-light deferred example, outside the local clusteredRendering runtime.
+- `sample/clusteredShading/`. Gallery link points to external demo; it is not the local implementation.
+
+</details>
+
+<!-- execution-flow:end -->
+
+<details>
+<summary>Subsystem technique index</summary>
+
 ### Subsystem map
 
 Select a subsystem in the diagram to open its techniques, tradeoffs, and code references. The numbered links provide the same navigation. This map groups components; the execution diagrams show their runtime flow.
@@ -46,6 +285,8 @@ flowchart LR
 7. [Benchmark and timing](#subsystem-benchmark-and-timing)
 
 The extension adds [clustered shading](#clustered-shading) in forward and deferred paths inside the retained WebGPU Samples tree. The inherited camera, gallery, math package, and build system remain the host; the new sample owns procedural boxes, bounded lights, cluster culling, and its verification controls. The inherited deferred sample is a separate all-light path, not part of this extension.
+
+</details>
 
 <details>
 <summary>Expand flow diagram 1</summary>
